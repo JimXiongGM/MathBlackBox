@@ -1,4 +1,3 @@
-from functools import lru_cache
 from glob import glob
 import json
 import re
@@ -40,9 +39,6 @@ for file in data_list:
             right += 1
         else:
             all_fail += 1
-
-
-import numpy as np
 
 
 all_len = len(data_list)

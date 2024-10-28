@@ -1,7 +1,5 @@
 import copy
-from curses.ascii import isalpha, isdigit
 import math
-import multiprocessing
 import os
 import re
 import socket
@@ -12,7 +10,6 @@ import json
 import random
 from functools import lru_cache
 import numpy as np
-from tqdm import tqdm
 import time
 from retry import retry
 import random
@@ -24,7 +21,7 @@ import random
 # MODEL_NAME = 'google/gemma-1.1-7b-it'
 # MODEL_NAME = 'test-lora'
 # MODEL_NAME = '/home/bingxing2/ailab/group/ai4phys/EXPORT/new_mistral_7b_4'
-MODEL_NAME = ''
+MODEL_NAME = 'meta-llama/Meta-Llama-3.1-8B-Instruct'
 
 
 # DATA_NAME = 'meta-math-40k-pathfinder-mistral7B'
@@ -45,7 +42,7 @@ MODEL_NAME = ''
 # DATA_NAME = 'AIME-pathfinder-llama3-8b-mcts-2'
 # DATA_NAME = 'gsm8k-testtime-pathfinder-mistral7B-mcts-2'
 # DATA_NAME = 'gsm8k-testtime-pathfinder-pureseq-mistral7B-5'
-DATA_NAME = ''
+DATA_NAME = 'gsmhard-llama3-8b-new-mcts-8'
 
 if MODEL_NAME == '':
     MODEL_NAME = sys.argv[1]
@@ -378,54 +375,13 @@ else:
     else:
         dataset = load_dataset('json',data_files=f'/home/bingxing2/ailab/group/ai4phys/math/data_mistral_var_sft.json')
 
-dataset.shuffle()
+dataset.shuffle(seed=42)
+# select a subset of the dataset
+dataset = dataset.select(range(100))
 from openai import OpenAI
-
-# generation_lock = multiprocessing.Lock()
-
-
-
-
-
-
-# def generate(prompt,):
-#     with generation_lock:
-#         ret = generate_in(prompt,)
-#     return ret
-
-# client = OpenAI(
-#     base_url="http://10.140.24.132:10087/v1",
-#     api_key="token-abc123",
-# )
 
 clients = []
 times = time.time()
-# def get_clients():
-#     global clients
-#     lines = open('/mnt/petrelfs/zhangdi1/reasoningpath/math/server.csv','r').readlines()
-#     for line in lines:
-#         if len(line) < 3:
-#             continue
-#         node,port,model = line.split(',')
-#         ip = '.'.join(node.split('-')[-4:])
-#         client = OpenAI(
-#         base_url=f"http://{ip}:{port}/v1",
-#         api_key="token-abc123",
-#         )
-#         try:
-#             client.chat.completions.create(
-#             model=MODEL_NAME,
-#             messages=[
-#                 {"role": "user", "content": 'hi'}#+'\nBe concisely and clearly in no more than 50 words.'
-#             ],
-#             # max_tokens=min(len(prompt)+128,8000),
-#             temperature=0.95,
-#             timeout=10
-#             )
-#             print(len(clients)+1)
-#             clients.append(client)
-#         except:
-#             pass
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -458,18 +414,12 @@ def create_client(line):
 def get_clients():
     global clients
     lines = open('./server.csv','r').readlines()
-    with ThreadPoolExecutor() as executor:
+    with ThreadPoolExecutor(max_workers=len(lines)*2) as executor:
         executor.map(create_client, lines)
-
-
 
 
 def get_client():
     global clients,times
-    # if time.time() - times > 1800:
-    #     clients = []
-    #     get_clients()
-    #     times = time.time()
     return random.choice(clients)
 
 
@@ -527,15 +477,15 @@ def get_weak_answer(question,new_len=0,ans_format=''):
 
 def get_weak_hints(question,weak_answer,ground_truth_label=None,new_len=0,history=[],alreadygood=False,ans_format=''):
     query = f'Question: {question}\nSince we have a weak Answer, could you provide me with a relection or feedback to correct this answer better? Analyze this Answer Strictly and Critic, point out every flaw for ervery possible imperfect to minus every possible score!\nLet\'s think step by step.'
-    return generate(query,history)
+    return generate(query,history) # history 中含有 weak_answer
 
 def get_better_answer(question,weak_answer,hint,new_len=0,history=[],ans_format=''):
     query = f'Question: {question}\nPlease refine the your answer according to your Reflection or Feedback. The response should begin with [reasoning process]...[Verification]... and end with end with {ans_format}\nLet\'s think step by step.'
     return generate(query,history)
 
-def get_gt_hints(question,ground_truth,new_len=0):
-    query = f"Question: {question}\nGround Truth:{ground_truth}\nAccording to ground truth answer we have, Could you descript the thought process of ground truth answer, please don’t give me the answer, just the thought process?"
-    return generate(query)
+# def get_gt_hints(question,ground_truth,new_len=0):
+#     query = f"Question: {question}\nGround Truth:{ground_truth}\nAccording to ground truth answer we have, Could you descript the thought process of ground truth answer, please don’t give me the answer, just the thought process?"
+#     return generate(query)
 
 
 datas = []
@@ -558,7 +508,7 @@ def extract_label(text: str,type='') -> str:
         text = text.split('\n####')[-1].replace(',','')
     elif 'The answer is' in text:
         text = text.split('The answer is')[-1].replace(',','')
-    numbers = pattern.findall(text)
+    numbers = pattern.findall(text) # 直接抽所有的数字
     if not numbers:
         return None
     if '\n####' in text or 'The answer is' in text:
@@ -647,14 +597,16 @@ def get_best_explore_from_ucb(to_explore, ucb_bank):
 
 
 def compute_ucb(r_c, N_n, N_c, C):
+    """
+    UCT 更新：借鉴 AlphaGo，我们使用结合 UCB-1 方法的 UCT 来平衡节点的探索与利用
+    UCT_a = Q(a) + c\sqrt{\frac{\ln{N(\text{Father}(a))+1}}{N(a)+\epsilon}}
+    其中Q(a)是答案a的Q值，N(⋅)是给定节点的总访问次数
+    和原版是类似的，就是 当前节点c的价值 + 父节点的总访问次数 / 当前节点的访问次数
+    """
     return r_c + C * math.sqrt(math.log(N_n + 1) / (N_c + 1e-5))
 
-def update_ucb(fathers, childs, to_explore, to_explore_reward, ucb_bank, C=1.4,gamma=0.85):
-    # 计算所有节点的访问次数
-    visit_count = {node: len(to_explore_reward[node]) for node in to_explore}
-
+def update_ucb(fathers, childs, to_explore, to_explore_reward, ucb_bank, C=1.4, gamma=0.85):
     # 计算所有节点的平均奖励
-    # avg_reward = {node: sum(to_explore_reward[node]) / len(to_explore_reward[node]) for node in to_explore}
     avg_reward = {node: (min(to_explore_reward[node]) + np.mean(to_explore_reward[node])) / 2 for node in to_explore}
 
     # 获取所有叶子节点
@@ -662,7 +614,6 @@ def update_ucb(fathers, childs, to_explore, to_explore_reward, ucb_bank, C=1.4,g
     
     # 更新所有叶子节点的UCB值
     for leaf in leaves:
-        # ucb_bank[leaf] = avg_reward[leaf]
         ucb_bank[leaf] = compute_ucb(avg_reward[leaf],len(to_explore_reward.get(fathers.get(leaf,None),[])),len(to_explore_reward.get(leaf,[])),C)
     
     # 从叶子节点向上更新父节点的UCB值
@@ -698,12 +649,12 @@ def main_loop(query,ground_truth,max_iter=16,ans_format=''):
     ucb_bank = {}
     fathers = {}
     childs = {}
+    hints_reward_imp_bank = {}
+
     def sampling_reward(answer):
         if answer not in to_explore_reward:
             to_explore_reward[answer] = []
         reward = cal_reward(query,answer)
-        # if check(ground_truth,answer):
-        #     reward += 100
         to_explore_reward[answer].append(reward)
 
     def add_to_hints_bank(hints,weak_answer):
@@ -716,12 +667,11 @@ def main_loop(query,ground_truth,max_iter=16,ans_format=''):
             childs[father] = []
         childs[father].append(child)
 
-    hints_reward_imp_bank = {}
     def add_to_hints_reward_imp_bank(hints,weak_answer,reward,answer):
         if weak_answer not in hints_reward_imp_bank:
             hints_reward_imp_bank[weak_answer] = []
         hints_reward_imp_bank[weak_answer].append((hints,reward,answer))
-    ground_truth_label = extract_label(ground_truth)
+
     ###get weak answer###
     weak_answer,history = get_weak_answer(query,ans_format=ans_format)
     history_bank[weak_answer] = tuple(history)
@@ -729,11 +679,9 @@ def main_loop(query,ground_truth,max_iter=16,ans_format=''):
     to_explore = [weak_answer,]
     childs[weak_answer] = []
     fathers[weak_answer] = None
-    # to_explore_reward = [cal_reward(query,weak_answer),]
+
     sampling_reward(weak_answer)
-    ##add total-bad answer###
-    # if check(ground_truth,weak_answer):
-    #     return 
+
     if True:#not check(ground_truth,weak_answer):
         total_bad = random.choice(["I Don't Know","I can't understand this question.","I can't help with this question.","I don't know how to solve this question.","I don't know the answer to this question.","I don't know the answer to this question, sorry."])
         total_bad_history = copy.deepcopy(history)
@@ -743,13 +691,13 @@ def main_loop(query,ground_truth,max_iter=16,ans_format=''):
         to_explore += [total_bad,]
         childs[total_bad] = []
         fathers[total_bad] = None
-        # to_explore_reward = [cal_reward(query,weak_answer),]
+
         sampling_reward(total_bad)
     hints_list = []
     if check(ground_truth,weak_answer) :#and 'testtime' in DATA_NAME
         return hints_list,answers_list,to_explore,to_explore_reward,hints_bank,history_bank,hints_reward_imp_bank,fathers,childs,ucb_bank
     patient = 0 if 'testtime' not in DATA_NAME else 0
-    alpha = 0.45
+
     update_ucb(fathers=fathers,childs=childs,to_explore=to_explore,to_explore_reward=to_explore_reward,ucb_bank=ucb_bank)
     for i in range(max_iter):
         print('iteration:',i)
@@ -773,7 +721,7 @@ def main_loop(query,ground_truth,max_iter=16,ans_format=''):
                 return hints_list,answers_list,to_explore,to_explore_reward,hints_bank,history_bank,hints_reward_imp_bank,fathers,childs,ucb_bank
             patient -= 1
         update_ucb(fathers=fathers,childs=childs,to_explore=to_explore,to_explore_reward=to_explore_reward,ucb_bank=ucb_bank)
-        add_to_hints_reward_imp_bank(hints,weak_answer,min(to_explore_reward.get(answer)) - min(to_explore_reward.get(weak_answer)),answer)#ucb_bank[answer] - ucb_bank[weak_answer]
+        add_to_hints_reward_imp_bank(hints,weak_answer,min(to_explore_reward.get(answer)) - min(to_explore_reward.get(weak_answer)),answer)
     return hints_list,answers_list,to_explore,to_explore_reward,hints_bank,history_bank,hints_reward_imp_bank,fathers,childs,ucb_bank
 
 def tryfunc(example):
@@ -842,7 +790,7 @@ def func(example):
         
     # new_len = len(ground_truth)
     hints_prompt = f'Question: {query}\nCould you provide me with the thought process to solve this problem, but please don’t give me the answer or calculation, just the thought process?'
-    max_iter = 16
+    max_iter = 8
     if 'meta-math' in DATA_NAME:
         max_iter = 8
     if 'testtime' in DATA_NAME:
@@ -883,12 +831,6 @@ def func(example):
 
 if __name__ == '__main__':
     get_clients()
-    # while True:
-    #     try:
-    # datas = dataset.map(func,num_proc=len(clients)*8)
-    datas = dataset.map(func,num_proc=32)
-        # except :
-        #     continue
-        # break
-
-    # datas.save_to_disk('meta-math-40k-weak-better-mistral7B-data')
+    datas = dataset.map(func,num_proc=4)
+    # for example in dataset:
+    #     func(example)
